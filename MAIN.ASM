@@ -19,6 +19,7 @@ cart_rom_len					EQU	2000h
 ;; BIOS Service Interrupt CONSTANTS
 int_video						EQU	10h
 	svc_video_mode					EQU	00h
+		val_video_mode_80_25_grey		EQU	02h
 	svc_video_set_cursor_pos		EQU	02h	
 	svc_video_write_char_tty		EQU	0Eh
 	svc_video_get_current_mode		EQU	0Fh
@@ -85,11 +86,11 @@ LOAD_DOS_INT21H MACRO
 ENDM
 
 LONG_DELAY MACRO
-	local LONG_DELAY_LOOP
+	local LONG_DELAY_LOOP_INNER
 	push	cx
 	mov		cx,0FFFFh
-LONG_DELAY_LOOP:
-	loop	LONG_DELAY_LOOP
+LONG_DELAY_LOOP_INNER:
+	loop	LONG_DELAY_LOOP_INNER
 	pop		cx
 ENDM
 
@@ -103,8 +104,7 @@ UTIL_PRINT_NEWLINE MACRO
 	int		int_video
 ENDM
 
-PRINT_TEST_STRING MACRO
-	mov		dx,offset TEST_STRING
+PRINT_LINE MACRO ; Assumes DS:DX is set
 	mov		ah,svc_dos_print_str
 	int		int_dos_21
 	UTIL_PRINT_NEWLINE
@@ -200,12 +200,13 @@ DELAY MACRO
 ENDM
 
 OutputStr	label byte
-	db 0Dh,0Ah,'Timed count: ','$'
+	;db 0Dh,0Ah,'Timed count: ','$'
+	db 'Timed count: ','$'
 ASCIICountEnd	label byte
 	db ' microseconds',0Dh,0Ah
 	db '$'
 OverflowStr	label byte
-	db 0Dh, 0Ah
+	;db 0Dh, 0Ah
 	db '*************************************************'
 	db 0Dh, 0Ah
 	db '* The timer overflowed, so the interval was     *'
@@ -368,25 +369,6 @@ ReferenceZTimerOff PROC NEAR
 ReferenceZTimerOff ENDP
 
 INITIALIZE_VALS MACRO
-	;mov		al,0
-	;mov		es:OverflowFlag,al 
-
-	;mov		ax,12345
-	;mov		es:TimedCount,ax
-	;mov		ax,02345
-	;mov		es:ReferenceCount,ax
-	
-
-	;mov		al,'1'
-	;mov		es:OutputStrVars1,al
-	;mov		al,'2'
-	;mov		es:OutputStrVars2,al
-	;mov		al,'3'
-	;mov		es:OutputStrVars3,al
-	;mov		al,'4'
-	;mov		es:OutputStrVars4,al
-	;mov		al,'5'
-	;mov		es:OutputStrVars5,al
 	mov		al,'$'
 	mov		es:OutputStrVars6,al
 ENDM
@@ -463,39 +445,176 @@ EndZTimerReport:
 	ret
 ZTimerReport ENDP
 
+; Test Equates
+video_gate_array				EQU	03DAh
+vertical_retrace				EQU	08h
+
+; Test RAM values
+ram_bytes						EQU 100h ; 2 Bytes
+
+WAIT_FOR_VTRACE MACRO
+	local WAIT_FOR_VTRACE_1, WAIT_FOR_VTRACE_2
+	; To sync with Vtrace
+	;	WFV1 - Wait until we're *not* in Vtrace(in case we got here in the middle of one)
+	;	WFV2 - Wait until we're in Vtrace
+	mov		dx,video_gate_array
+WAIT_FOR_VTRACE_1:
+	in		al,dx
+	and		al,vertical_retrace
+	cmp		al,00h
+	jne		WAIT_FOR_VTRACE_1
+WAIT_FOR_VTRACE_2:
+	in		al,dx
+	and		al,vertical_retrace
+	cmp		al,vertical_retrace
+	jne		WAIT_FOR_VTRACE_2
+ENDM
+
+WAIT_FOR_SCAN MACRO
+	local WAIT_FOR_SCAN_1, WAIT_FOR_SCAN_2
+	; To sync with Scanning
+	;	WFV1 - Wait until we're in Vtrace (in case we were in the middle of a scan)
+	;	WFV2 - Wait until we're *not* in Vtrace
+	mov		dx,video_gate_array
+WAIT_FOR_SCAN_1:
+	in		al,dx
+	and		al,vertical_retrace
+	cmp		al,vertical_retrace
+	jne		WAIT_FOR_SCAN_1
+WAIT_FOR_SCAN_2:
+	in		al,dx
+	and		al,vertical_retrace
+	cmp		al,00h
+	jne		WAIT_FOR_SCAN_2
+ENDM
+
+TIME_VTRACE PROC NEAR
+	WAIT_FOR_VTRACE
+	call	ZTimerOn
+TIME_VTRACE_WAIT: ; Wait until VTRACE is over
+	in		al,dx
+	and		al,vertical_retrace
+	cmp		al,00h
+	jne		TIME_VTRACE_WAIT
+	
+	call	ZTimerOff
+	call	ZTimerReport
+	ret
+TIME_VTRACE ENDP
+
+TIME_SCAN PROC NEAR
+	WAIT_FOR_SCAN
+	call	ZTimerOn
+TIME_SCAN_WAIT: ; Wait until SCAN is over
+	in		al,dx
+	and		al,vertical_retrace
+	cmp		al,vertical_retrace
+	jne		TIME_SCAN_WAIT
+	
+	call	ZTimerOff
+	call	ZTimerReport
+	ret
+TIME_SCAN ENDP
+
+MEMORY_VTRACE PROC NEAR
+	WAIT_FOR_VTRACE
+	call	ZTimerOn
+	REPT	32
+	mov		ax,es:ram_bytes
+	mov		es:ram_bytes,ax
+	ENDM
+	call	ZTimerOff
+	call	ZTimerReport
+	ret
+MEMORY_VTRACE ENDP
+
+MEMORY_SCAN PROC NEAR
+	WAIT_FOR_SCAN
+	call	ZTimerOn
+	REPT	32
+	mov		ax,es:ram_bytes
+	mov		es:ram_bytes,ax
+	ENDM
+	call	ZTimerOff
+	call	ZTimerReport
+	ret
+MEMORY_SCAN ENDP
+
 ;; MAIN Function
 MAIN:
 	mov		ax,val_top_of_stack ; Top of the stack
 	mov		sp,ax ;; Reset the stack pointer
 	sti		;; Re-enable interrupts to stop disk drive from spinning indefinitely
 	
-	LONG_DELAY
+	mov		cx,100
+WAIT_UNTIL_DISK:
 	LONG_DELAY ; Long Delay to let disk drive timeout
+	loop	WAIT_UNTIL_DISK
+	
 	LOAD_DOS_INT21H ; Load the DOS INT21h 
 	
-	DEFAULT_CART_SEGMENTS
+	DEFAULT_CART_SEGMENTS ; Setup cartridge segments
 	
-	PRINT_TEST_STRING
-
+	mov		dx,offset TEST_STRING
+	PRINT_LINE
+	
+	;; Test 1: How long VTRACE is
+	mov		dx,offset TIME_VTRACE_STR
+	PRINT_LINE
+	call TIME_VTRACE
+	;; Test 2: How long SCAN is
+	mov		dx,offset TIME_SCAN_STR
+	PRINT_LINE
+	call TIME_SCAN
+	;; Test 2: How long SCAN is
+	mov		dx,offset TIME_SCAN_STR
+	PRINT_LINE
+	call TIME_SCAN
+	;; Test 1: How long VTRACE is
+	mov		dx,offset TIME_VTRACE_STR
+	PRINT_LINE
+	call TIME_VTRACE
+	
+	;; Test 3: memory word copies in VBLANK
+	mov		dx,offset MEMORY_VTRACE_STR
+	PRINT_LINE
+	call MEMORY_VTRACE
+	;; Test 4: memory word copies in SCAN
+	mov		dx,offset MEMORY_SCAN_STR
+	PRINT_LINE
+	call MEMORY_SCAN
+	;; Test 4: memory word copies in SCAN
+	mov		dx,offset MEMORY_SCAN_STR
+	PRINT_LINE
+	call MEMORY_SCAN
+	;; Test 3: memory word copies in VBLANK
+	mov		dx,offset MEMORY_VTRACE_STR
+	PRINT_LINE
+	call MEMORY_VTRACE
 	;;;;;;;;;;;;;;;;;;;;;;;;
 	;; USER SETUP CODE HERE
 	;;;;;;;;;;;;;;;;;;;;;;;;
+	
 	;;;;;;;;;;;;;;;;;;;;;;;;
-	call	ZTimerOn
+	;call	ZTimerOn
 	;;;;;;;;;;;;;;;;;;;;;;;;
 	;; USER TEST CODE HERE
 	;;;;;;;;;;;;;;;;;;;;;;;;
 	;;;;;;;;;;;;;;;;;;;;;;;;
-	
-	call	ZTimerOff
-	
-	call ZTimerReport
-	
+	;call	ZTimerOff
+	;call ZTimerReport
+
+
+
 GAMELOOP:	; Fall into Gameloop
 	jmp		GAMELOOP
 
 DATA:
 TEST_STRING db 'Hola Mundo!$'
+TIME_VTRACE_STR db 'Testing VTRACE Time$'
+TIME_SCAN_STR db 'Testing SCAN Time$'
+MEMORY_VTRACE_STR db 'Testing VTRACE Memory:$'
+MEMORY_SCAN_STR db 'Testing SCAN Memory:$'
 
 ORG	cart_rom_len - 16; 15(name) + 2(chksum) ;; TODO - can the assembler calculate this
 FOOTER: ; PCJr Cartridge Footer
